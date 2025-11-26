@@ -1298,11 +1298,11 @@ e.g., 'Section 14Q deduction for renovation costs' or 'IRAS e-Tax Guide on trans
           </div>
         )}
 
-        {/* Multi-Run Results (Best of N mode) - Horizontal Scroll */}
+        {/* Multi-Run Results (Best of N mode) - Full Width Horizontal Scroll */}
         {hasMultiResponses && (
-          <div className="relative">
+          <div className="relative -mx-4 sm:-mx-6 lg:-mx-8 xl:mx-[calc(-50vw+50%)]">
             {/* Scroll hint */}
-            <div className="mb-3 flex items-center justify-between">
+            <div className="mb-3 flex items-center justify-between px-4 sm:px-6 lg:px-8">
               <p className="text-sm text-zinc-500">
                 {multiRunList.length} runs • Scroll horizontally to compare →
               </p>
@@ -1322,9 +1322,9 @@ e.g., 'Section 14Q deduction for renovation costs' or 'IRAS e-Tax Guide on trans
               </div>
             </div>
 
-            {/* Horizontal scroll container */}
-            <div className="scrollable-content -mx-4 overflow-x-auto px-4 pb-4 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
-              <div className="flex gap-6" style={{ width: `${multiRunList.length * 800}px`, maxWidth: "none" }}>
+            {/* Horizontal scroll container - full viewport width */}
+            <div className="scrollable-content overflow-x-auto px-4 pb-4 sm:px-6 lg:px-8">
+              <div className="flex gap-6" style={{ minWidth: "fit-content" }}>
                 {multiRunList.map(([runId, result], index) => {
                   const runConfig = runConfigs.find((c) => c.id === runId);
                   
@@ -1332,7 +1332,7 @@ e.g., 'Section 14Q deduction for renovation costs' or 'IRAS e-Tax Guide on trans
                     <div
                       key={runId}
                       id={`run-${runId}`}
-                      className="w-[780px] shrink-0 overflow-hidden rounded-xl border border-zinc-700 bg-card"
+                      className="w-[min(90vw,900px)] shrink-0 overflow-hidden rounded-xl border border-zinc-700 bg-card"
                     >
                       {/* Run Header */}
                       <div className="flex items-center justify-between border-b border-zinc-700 bg-zinc-800/50 px-5 py-3">
