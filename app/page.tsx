@@ -67,8 +67,8 @@ export default function Home() {
   // Best of N state
   const [bestOfN, setBestOfN] = useState(false);
   const [runConfigs, setRunConfigs] = useState<RunConfig[]>([
-    { id: "run-1", minimizerModel: "gpt-5.1-2025-11-13", hawkModel: "gpt-5-2025-08-07" },
-    { id: "run-2", minimizerModel: "gpt-5-2025-08-07", hawkModel: "gpt-5.1-2025-11-13" },
+    { id: "run-1", minimizerModel: "gpt-5.1-2025-11-13", hawkModel: "gpt-5.1-2025-11-13" },
+    { id: "run-2", minimizerModel: "gpt-5-mini-2025-08-07", hawkModel: "gpt-5-mini-2025-08-07" },
   ]);
   const [multiResponses, setMultiResponses] = useState<Record<string, MultiRunResult>>({});
   const [expandedRuns, setExpandedRuns] = useState<Set<string>>(new Set(["run-1"]));
@@ -883,7 +883,7 @@ export default function Home() {
                           {
                             id: `run-${runConfigs.length + 1}`,
                             minimizerModel: "gpt-5.1-2025-11-13",
-                            hawkModel: "gpt-5-2025-08-07",
+                            hawkModel: "gpt-5.1-2025-11-13",
                           },
                         ]);
                       }
