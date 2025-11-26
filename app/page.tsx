@@ -537,15 +537,39 @@ export default function Home() {
         const finalSources = [...accumulatedSources.current];
 
         if (bestOfN && Object.keys(accumulatedMultiContent.current).length > 0) {
-          // Save Best of N debate
-          const runs = runConfigs.map((config) => ({
-            id: config.id,
-            minimizerModel: config.minimizerModel,
-            hawkModel: config.hawkModel,
-            minimizerResponse: accumulatedMultiContent.current[config.id]?.minimizer || "",
-            hawkResponse: accumulatedMultiContent.current[config.id]?.compliance_hawk || "",
-          }));
-          saveBestOfNDebate(finalTopic, runs, finalSources);
+          // Fetch summaries for each run in Best of N mode
+          setSummarizing(true);
+          const summaryPromises = runConfigs.map(async (config) => {
+            const runContent = accumulatedMultiContent.current[config.id];
+            if (!runContent) return { runId: config.id, summaries: {} };
+            
+            const sums = await fetchSummaries(runContent);
+            return { runId: config.id, summaries: sums || {} };
+          });
+
+          Promise.all(summaryPromises).then((results) => {
+            // Update multiResponses with summaries
+            setMultiResponses((prev) => {
+              const updated = { ...prev };
+              for (const { runId, summaries: sums } of results) {
+                if (updated[runId]) {
+                  updated[runId] = { ...updated[runId], summaries: sums };
+                }
+              }
+              return updated;
+            });
+            setSummarizing(false);
+
+            // Save Best of N debate
+            const runs = runConfigs.map((config) => ({
+              id: config.id,
+              minimizerModel: config.minimizerModel,
+              hawkModel: config.hawkModel,
+              minimizerResponse: accumulatedMultiContent.current[config.id]?.minimizer || "",
+              hawkResponse: accumulatedMultiContent.current[config.id]?.compliance_hawk || "",
+            }));
+            saveBestOfNDebate(finalTopic, runs, finalSources);
+          });
         } else if (!bestOfN && Object.keys(accumulatedContent.current).length > 0) {
           // Save single run debate with summaries
           const finalContent = { ...accumulatedContent.current };
@@ -766,7 +790,7 @@ export default function Home() {
             <div className="flex items-center gap-3">
               <button
                 onClick={() => setBestOfN(false)}
-                disabled={loading || viewingLoadedDebate}
+                disabled={loading || viewingLoadedDebate || hasResponses || hasMultiResponses}
                 className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
                   !bestOfN
                     ? "bg-accent text-black"
@@ -777,7 +801,7 @@ export default function Home() {
               </button>
               <button
                 onClick={() => setBestOfN(true)}
-                disabled={loading || viewingLoadedDebate}
+                disabled={loading || viewingLoadedDebate || hasResponses || hasMultiResponses}
                 className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
                   bestOfN
                     ? "bg-accent text-black"
@@ -1351,6 +1375,23 @@ e.g., 'Section 14Q deduction for renovation costs' or 'IRAS e-Tax Guide on trans
                               </div>
                             </div>
                           </div>
+                          {/* TL;DR Summary */}
+                          {result.summaries?.minimizer ? (
+                            <div
+                              className="mx-4 mt-3 mb-1 shrink-0 rounded-lg p-2 text-xs"
+                              style={{ backgroundColor: `${result.minimizer.color}12`, borderLeft: `3px solid ${result.minimizer.color}` }}
+                            >
+                              <span className="font-semibold text-white">TL;DR: </span>
+                              <span className="text-zinc-300">{result.summaries.minimizer}</span>
+                            </div>
+                          ) : summarizing && !loading ? (
+                            <div
+                              className="mx-4 mt-3 mb-1 shrink-0 rounded-lg p-2 text-xs"
+                              style={{ backgroundColor: `${result.minimizer.color}12`, borderLeft: `3px solid ${result.minimizer.color}` }}
+                            >
+                              <span className="text-zinc-400">Generating summary...</span>
+                            </div>
+                          ) : null}
                           <div
                             className={`p-4 ${compactMode ? "scrollable-content overflow-y-auto" : ""}`}
                             style={compactMode ? { maxHeight: "400px" } : undefined}
@@ -1387,6 +1428,23 @@ e.g., 'Section 14Q deduction for renovation costs' or 'IRAS e-Tax Guide on trans
                               </div>
                             </div>
                           </div>
+                          {/* TL;DR Summary */}
+                          {result.summaries?.compliance_hawk ? (
+                            <div
+                              className="mx-4 mt-3 mb-1 shrink-0 rounded-lg p-2 text-xs"
+                              style={{ backgroundColor: `${result.hawk.color}12`, borderLeft: `3px solid ${result.hawk.color}` }}
+                            >
+                              <span className="font-semibold text-white">TL;DR: </span>
+                              <span className="text-zinc-300">{result.summaries.compliance_hawk}</span>
+                            </div>
+                          ) : summarizing && !loading ? (
+                            <div
+                              className="mx-4 mt-3 mb-1 shrink-0 rounded-lg p-2 text-xs"
+                              style={{ backgroundColor: `${result.hawk.color}12`, borderLeft: `3px solid ${result.hawk.color}` }}
+                            >
+                              <span className="text-zinc-400">Generating summary...</span>
+                            </div>
+                          ) : null}
                           <div
                             className={`p-4 ${compactMode ? "scrollable-content overflow-y-auto" : ""}`}
                             style={compactMode ? { maxHeight: "400px" } : undefined}
