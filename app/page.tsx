@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 
 const AVAILABLE_MODELS = [
   "gpt-5.1-2025-11-13",
@@ -25,6 +25,13 @@ type Source = {
   url: string;
 };
 
+type SelectionPopup = {
+  text: string;
+  x: number;
+  y: number;
+  personaName: string;
+} | null;
+
 export default function Home() {
   const [topic, setTopic] = useState("");
   const [loading, setLoading] = useState(false);
@@ -38,8 +45,97 @@ export default function Home() {
   const [hawkModel, setHawkModel] = useState<string>("gpt-5.1-2025-11-13");
   const [enableWebSearch, setEnableWebSearch] = useState(true);
 
+  // Selection popup state
+  const [selectionPopup, setSelectionPopup] = useState<SelectionPopup>(null);
+  const [followupQuestion, setFollowupQuestion] = useState("");
+  const [followupAnswer, setFollowupAnswer] = useState("");
+  const [followupLoading, setFollowupLoading] = useState(false);
+  const [followupError, setFollowupError] = useState<string | null>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
+
   // Track accumulated content for summarization
   const accumulatedContent = useRef<Record<string, string>>({});
+
+  // Handle text selection
+  useEffect(() => {
+    const handleMouseUp = (e: MouseEvent) => {
+      // Small delay to let selection finalize
+      setTimeout(() => {
+        // Ignore if clicking inside the popup
+        if (popupRef.current?.contains(e.target as Node)) return;
+
+        const selection = window.getSelection();
+        const selectedText = selection?.toString().trim();
+
+        if (!selectedText || selectedText.length < 10) {
+          // Only close if clicking outside popup and no valid selection
+          setSelectionPopup(null);
+          setFollowupQuestion("");
+          setFollowupAnswer("");
+          setFollowupError(null);
+          return;
+        }
+
+        // Check if selection is within a response card
+        const range = selection?.getRangeAt(0);
+        if (!range) return;
+
+        const container = range.commonAncestorContainer;
+        const element = container.nodeType === Node.TEXT_NODE ? container.parentElement : container as Element;
+        const responseCard = element?.closest?.(".response-card");
+
+        if (responseCard) {
+          const personaName = responseCard.getAttribute("data-persona") || "Unknown";
+          const rect = range.getBoundingClientRect();
+
+          setSelectionPopup({
+            text: selectedText.slice(0, 500), // Limit text length
+            x: rect.left + rect.width / 2,
+            y: rect.bottom + 10,
+            personaName,
+          });
+          // Reset state for new selection
+          setFollowupAnswer("");
+          setFollowupQuestion("");
+          setFollowupError(null);
+        }
+      }, 10);
+    };
+
+    document.addEventListener("mouseup", handleMouseUp);
+    return () => document.removeEventListener("mouseup", handleMouseUp);
+  }, []);
+
+  // Handle followup question
+  const handleFollowup = async () => {
+    if (!selectionPopup || !followupQuestion.trim()) return;
+
+    setFollowupLoading(true);
+    setFollowupError(null);
+    try {
+      const res = await fetch("/api/followup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          highlightedText: selectionPopup.text,
+          question: followupQuestion.trim(),
+          personaContext: selectionPopup.personaName,
+        }),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.answer) {
+        setFollowupAnswer(data.answer);
+      } else {
+        setFollowupError(data.error || "Failed to get answer");
+      }
+    } catch (err) {
+      console.error("Followup error:", err);
+      setFollowupError("Network error - please try again");
+    } finally {
+      setFollowupLoading(false);
+    }
+  };
 
   const fetchSummaries = useCallback(async (contents: Record<string, string>) => {
     setSummarizing(true);
@@ -81,6 +177,7 @@ export default function Home() {
       setResponses({});
       setSummaries({});
       setSources([]);
+      setSelectionPopup(null);
       accumulatedContent.current = {};
 
       try {
@@ -361,14 +458,24 @@ e.g., 'Section 14Q deduction for renovation costs' or 'IRAS e-Tax Guide on trans
           </div>
         )}
 
+        {/* Hint for highlight feature */}
+        {hasResponses && !loading && (
+          <div className="mx-auto mb-4 max-w-3xl text-center">
+            <p className="text-xs text-zinc-500">
+              💡 Highlight any text in the responses to ask a follow-up question
+            </p>
+          </div>
+        )}
+
         {/* Results / Streaming */}
         {hasResponses && (
           <div className="grid gap-6 lg:grid-cols-2">
             {responseList.map((response) => (
               <div
                 key={response.id}
-                className="rounded-xl border-2 bg-card p-6"
+                className="response-card rounded-xl border-2 bg-card p-6"
                 style={{ borderColor: response.color }}
+                data-persona={response.name}
               >
                 <div className="mb-4 flex items-center gap-3">
                   <div
@@ -407,7 +514,7 @@ e.g., 'Section 14Q deduction for renovation costs' or 'IRAS e-Tax Guide on trans
                   </div>
                 ) : null}
 
-                <div className="response-content text-sm leading-relaxed">
+                <div className="response-content text-sm leading-relaxed select-text">
                   {response.content ? (
                     formatContent(response.content)
                   ) : (
@@ -430,6 +537,100 @@ e.g., 'Section 14Q deduction for renovation costs' or 'IRAS e-Tax Guide on trans
           </div>
         )}
       </div>
+
+      {/* Selection Popup */}
+      {selectionPopup && (
+        <div
+          ref={popupRef}
+          className="fixed z-50 w-96 max-w-[calc(100vw-2rem)] rounded-xl border border-zinc-700 bg-zinc-900 p-4 shadow-2xl"
+          style={{
+            left: `clamp(1rem, ${selectionPopup.x - 192}px, calc(100vw - 25rem))`,
+            top: `clamp(1rem, ${selectionPopup.y}px, calc(100vh - 20rem))`,
+          }}
+        >
+          {/* Close button */}
+          <button
+            onClick={() => {
+              setSelectionPopup(null);
+              setFollowupQuestion("");
+              setFollowupAnswer("");
+              setFollowupError(null);
+            }}
+            className="absolute right-2 top-2 p-1 text-zinc-500 hover:text-white transition-colors"
+          >
+            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+
+          {/* Highlighted text preview */}
+          <div className="mb-3 rounded-lg bg-zinc-800 p-3 pr-8">
+            <p className="text-xs text-zinc-500 mb-1">From {selectionPopup.personaName}:</p>
+            <p className="text-sm text-zinc-300 line-clamp-3 italic">"{selectionPopup.text}"</p>
+          </div>
+
+          {/* Error message */}
+          {followupError && (
+            <div className="mb-3 rounded-lg bg-red-500/10 border border-red-500/30 p-2 text-sm text-red-400">
+              {followupError}
+            </div>
+          )}
+
+          {/* Question input - always show if no answer yet */}
+          {!followupAnswer && (
+            <div className="space-y-3">
+              <input
+                type="text"
+                value={followupQuestion}
+                onChange={(e) => setFollowupQuestion(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleFollowup();
+                  }
+                }}
+                placeholder="Ask about this text..."
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2.5 text-sm text-white placeholder-zinc-500 focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                autoFocus
+                disabled={followupLoading}
+              />
+              <button
+                onClick={handleFollowup}
+                disabled={followupLoading || !followupQuestion.trim()}
+                className="w-full rounded-lg bg-accent px-3 py-2.5 text-sm font-medium text-black transition-all hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              >
+                {followupLoading ? (
+                  <>
+                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-black border-t-transparent" />
+                    Thinking...
+                  </>
+                ) : (
+                  "Ask GPT-5"
+                )}
+              </button>
+            </div>
+          )}
+
+          {/* Answer */}
+          {followupAnswer && (
+            <div className="space-y-3">
+              <div className="rounded-lg bg-accent/10 border border-accent/30 p-3 max-h-48 overflow-y-auto">
+                <p className="text-sm text-zinc-200 leading-relaxed whitespace-pre-wrap">{followupAnswer}</p>
+              </div>
+              <button
+                onClick={() => {
+                  setFollowupAnswer("");
+                  setFollowupQuestion("");
+                  setFollowupError(null);
+                }}
+                className="w-full rounded-lg border border-zinc-600 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:border-zinc-500 transition-colors"
+              >
+                Ask another question
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
