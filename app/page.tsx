@@ -34,6 +34,18 @@ type SelectionPopup = {
   personaName: string;
 } | null;
 
+type RunConfig = {
+  id: string;
+  minimizerModel: string;
+  hawkModel: string;
+};
+
+type MultiRunResult = {
+  minimizer: PersonaContent;
+  hawk: PersonaContent;
+  summaries: Record<string, string>;
+};
+
 export default function Home() {
   const [topic, setTopic] = useState("");
   const [loading, setLoading] = useState(false);
@@ -52,6 +64,16 @@ export default function Home() {
   const [includeSummary, setIncludeSummary] = useState(false);
   const [compactMode, setCompactMode] = useState(false); // Scrollable responses
 
+  // Best of N state
+  const [bestOfN, setBestOfN] = useState(false);
+  const [runConfigs, setRunConfigs] = useState<RunConfig[]>([
+    { id: "run-1", minimizerModel: "gpt-5.1-2025-11-13", hawkModel: "gpt-5-2025-08-07" },
+    { id: "run-2", minimizerModel: "gpt-5-2025-08-07", hawkModel: "gpt-5.1-2025-11-13" },
+  ]);
+  const [multiResponses, setMultiResponses] = useState<Record<string, MultiRunResult>>({});
+  const [expandedRuns, setExpandedRuns] = useState<Set<string>>(new Set(["run-1"]));
+  const [viewingLoadedDebate, setViewingLoadedDebate] = useState(false); // Lock mode when viewing history
+
   // History state
   const [history, setHistory] = useState<Debate[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -69,6 +91,8 @@ export default function Home() {
   // Track accumulated content for summarization
   const accumulatedContent = useRef<Record<string, string>>({});
   const accumulatedSources = useRef<Source[]>([]);
+  // For multi-run mode: runId -> personaId -> content
+  const accumulatedMultiContent = useRef<Record<string, Record<string, string>>>({});
 
   // Handle text selection
   useEffect(() => {
@@ -177,42 +201,122 @@ export default function Home() {
         minimizer_model: minimizerModel,
         hawk_model: hawkModel,
         sources: debateSources,
+        is_best_of_n: false,
+        runs: null,
       });
 
       if (error) throw error;
-      // Refresh history
       loadHistory();
     } catch (err) {
       console.error("Failed to save debate:", err);
     }
   };
 
+  const saveBestOfNDebate = async (
+    debateTopic: string,
+    debateRuns: Array<{
+      id: string;
+      minimizerModel: string;
+      hawkModel: string;
+      minimizerResponse: string;
+      hawkResponse: string;
+    }>,
+    debateSources: Source[]
+  ) => {
+    try {
+      const { error } = await supabase.current.from("debates").insert({
+        topic: debateTopic,
+        is_best_of_n: true,
+        runs: debateRuns,
+        sources: debateSources,
+        // Null out single-run fields
+        minimizer_response: null,
+        hawk_response: null,
+        minimizer_model: null,
+        hawk_model: null,
+      });
+
+      if (error) throw error;
+      loadHistory();
+    } catch (err) {
+      console.error("Failed to save best of N debate:", err);
+    }
+  };
+
   const loadDebate = (debate: Debate) => {
     setTopic(debate.topic);
-    setResponses({
-      minimizer: {
-        id: "minimizer",
-        name: "The Minimizer",
-        color: "#10b981",
-        model: debate.minimizer_model,
-        content: debate.minimizer_response,
-      },
-      compliance_hawk: {
-        id: "compliance_hawk",
-        name: "The Compliance Hawk",
-        color: "#ef4444",
-        model: debate.hawk_model,
-        content: debate.hawk_response,
-      },
-    });
-    setSummaries({
-      minimizer: debate.minimizer_summary || "",
-      compliance_hawk: debate.hawk_summary || "",
-    });
     setSources(debate.sources || []);
-    setMinimizerModel(debate.minimizer_model);
-    setHawkModel(debate.hawk_model);
     setHistoryOpen(false);
+    setViewingLoadedDebate(true);
+
+    if (debate.is_best_of_n && debate.runs) {
+      // Load Best of N debate
+      setBestOfN(true);
+      
+      // Restore run configs
+      const configs: RunConfig[] = debate.runs.map((run) => ({
+        id: run.id,
+        minimizerModel: run.minimizerModel,
+        hawkModel: run.hawkModel,
+      }));
+      setRunConfigs(configs);
+
+      // Restore multi-responses
+      const multiRes: Record<string, MultiRunResult> = {};
+      for (const run of debate.runs) {
+        multiRes[run.id] = {
+          minimizer: {
+            id: "minimizer",
+            name: "The Minimizer",
+            color: "#10b981",
+            model: run.minimizerModel,
+            content: run.minimizerResponse,
+          },
+          hawk: {
+            id: "compliance_hawk",
+            name: "The Compliance Hawk",
+            color: "#ef4444",
+            model: run.hawkModel,
+            content: run.hawkResponse,
+          },
+          summaries: {},
+        };
+      }
+      setMultiResponses(multiRes);
+      setExpandedRuns(new Set([debate.runs[0]?.id || "run-1"]));
+      
+      // Clear single-run state
+      setResponses({});
+      setSummaries({});
+    } else {
+      // Load single run debate
+      setBestOfN(false);
+      setResponses({
+        minimizer: {
+          id: "minimizer",
+          name: "The Minimizer",
+          color: "#10b981",
+          model: debate.minimizer_model,
+          content: debate.minimizer_response || "",
+        },
+        compliance_hawk: {
+          id: "compliance_hawk",
+          name: "The Compliance Hawk",
+          color: "#ef4444",
+          model: debate.hawk_model,
+          content: debate.hawk_response || "",
+        },
+      });
+      setSummaries({
+        minimizer: debate.minimizer_summary || "",
+        compliance_hawk: debate.hawk_summary || "",
+      });
+      setMinimizerModel(debate.minimizer_model || "gpt-5.1-2025-11-13");
+      setHawkModel(debate.hawk_model || "gpt-5.1-2025-11-13");
+      
+      // Clear multi-run state
+      setMultiResponses({});
+    }
   };
 
   const deleteDebate = async (id: string, e: React.MouseEvent) => {
@@ -299,9 +403,17 @@ export default function Home() {
       setResponses({});
       setSummaries({});
       setSources([]);
+      setMultiResponses({});
       setSelectionPopup(null);
+      setViewingLoadedDebate(false); // Clear when starting new debate
       accumulatedContent.current = {};
       accumulatedSources.current = [];
+      accumulatedMultiContent.current = {};
+
+      // Expand first run by default in multi-run mode
+      if (bestOfN && runConfigs.length > 0) {
+        setExpandedRuns(new Set([runConfigs[0].id]));
+      }
 
       try {
         const res = await fetch("/api/debate", {
@@ -316,6 +428,7 @@ export default function Home() {
             searchType,
             numResults,
             includeSummary,
+            runConfigs: bestOfN ? runConfigs : undefined,
           }),
         });
 
@@ -328,6 +441,7 @@ export default function Home() {
 
         const decoder = new TextDecoder();
         let buffer = "";
+        let isMultiRunMode = false;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -349,35 +463,94 @@ export default function Home() {
                 setSearching(false);
               } else if (data.type === "init") {
                 setSearching(false);
-                const initial: Record<string, PersonaContent> = {};
-                for (const p of data.personas) {
-                  initial[p.id] = { ...p, content: "" };
-                  accumulatedContent.current[p.id] = "";
+                isMultiRunMode = data.isMultiRun;
+
+                if (isMultiRunMode) {
+                  // Multi-run mode: initialize per-run responses
+                  const initialMulti: Record<string, MultiRunResult> = {};
+                  for (const run of data.runs) {
+                    accumulatedMultiContent.current[run.id] = {};
+                    initialMulti[run.id] = {
+                      minimizer: { ...run.personas[0], content: "" },
+                      hawk: { ...run.personas[1], content: "" },
+                      summaries: {},
+                    };
+                    for (const p of run.personas) {
+                      accumulatedMultiContent.current[run.id][p.id] = "";
+                    }
+                  }
+                  setMultiResponses(initialMulti);
+                } else {
+                  // Single run mode: use existing logic
+                  const initial: Record<string, PersonaContent> = {};
+                  const singleRun = data.runs[0];
+                  for (const p of singleRun.personas) {
+                    initial[p.id] = { ...p, content: "" };
+                    accumulatedContent.current[p.id] = "";
+                  }
+                  setResponses(initial);
                 }
-                setResponses(initial);
               } else if (data.type === "delta") {
-                accumulatedContent.current[data.personaId] =
-                  (accumulatedContent.current[data.personaId] || "") + data.delta;
-                setResponses((prev) => ({
-                  ...prev,
-                  [data.personaId]: {
-                    ...prev[data.personaId],
-                    content: accumulatedContent.current[data.personaId],
-                  },
-                }));
+                if (data.runId && data.runId !== "single") {
+                  // Multi-run delta
+                  const runId = data.runId;
+                  const personaId = data.personaId;
+                  if (!accumulatedMultiContent.current[runId]) {
+                    accumulatedMultiContent.current[runId] = {};
+                  }
+                  accumulatedMultiContent.current[runId][personaId] =
+                    (accumulatedMultiContent.current[runId][personaId] || "") + data.delta;
+
+                  setMultiResponses((prev) => {
+                    const updated = { ...prev };
+                    if (updated[runId]) {
+                      const personaKey = personaId === "minimizer" ? "minimizer" : "hawk";
+                      updated[runId] = {
+                        ...updated[runId],
+                        [personaKey]: {
+                          ...updated[runId][personaKey],
+                          content: accumulatedMultiContent.current[runId][personaId],
+                        },
+                      };
+                    }
+                    return updated;
+                  });
+                } else {
+                  // Single run delta
+                  accumulatedContent.current[data.personaId] =
+                    (accumulatedContent.current[data.personaId] || "") + data.delta;
+                  setResponses((prev) => ({
+                    ...prev,
+                    [data.personaId]: {
+                      ...prev[data.personaId],
+                      content: accumulatedContent.current[data.personaId],
+                    },
+                  }));
+                }
               }
             }
           }
         }
 
-        // Streaming done - now fetch summaries and save
-        if (Object.keys(accumulatedContent.current).length > 0) {
+        // Streaming done - save to Supabase
+        const finalTopic = topic.trim();
+        const finalSources = [...accumulatedSources.current];
+
+        if (bestOfN && Object.keys(accumulatedMultiContent.current).length > 0) {
+          // Save Best of N debate
+          const runs = runConfigs.map((config) => ({
+            id: config.id,
+            minimizerModel: config.minimizerModel,
+            hawkModel: config.hawkModel,
+            minimizerResponse: accumulatedMultiContent.current[config.id]?.minimizer || "",
+            hawkResponse: accumulatedMultiContent.current[config.id]?.compliance_hawk || "",
+          }));
+          saveBestOfNDebate(finalTopic, runs, finalSources);
+        } else if (!bestOfN && Object.keys(accumulatedContent.current).length > 0) {
+          // Save single run debate with summaries
           const finalContent = { ...accumulatedContent.current };
-          const finalTopic = topic.trim();
-          const finalSources = [...accumulatedSources.current];
           
           fetchSummaries(finalContent).then((newSums) => {
-            // Save to Supabase after summaries are ready
             saveDebate(
               finalTopic,
               finalContent.minimizer || "",
@@ -395,7 +568,7 @@ export default function Home() {
         setSearching(false);
       }
     },
-    [topic, loading, minimizerModel, hawkModel, enableWebSearch, searchMode, searchType, numResults, includeSummary, fetchSummaries, saveDebate]
+    [topic, loading, minimizerModel, hawkModel, enableWebSearch, searchMode, searchType, numResults, includeSummary, fetchSummaries, saveDebate, saveBestOfNDebate, bestOfN, runConfigs]
   );
 
   // Parse inline **bold** markdown
@@ -448,6 +621,8 @@ export default function Home() {
 
   const responseList = Object.values(responses);
   const hasResponses = responseList.length > 0;
+  const hasMultiResponses = Object.keys(multiResponses).length > 0;
+  const multiRunList = Object.entries(multiResponses);
 
   return (
     <div className="min-h-screen grid-bg">
@@ -521,14 +696,22 @@ export default function Home() {
                     </div>
                     <div className="mt-2 flex items-center gap-3 text-[10px] text-zinc-500">
                       <span>{new Date(debate.created_at).toLocaleDateString()}</span>
-                      <span className="flex items-center gap-1">
-                        <span className="h-1.5 w-1.5 rounded-full bg-minimizer" />
-                        {debate.minimizer_model.split("-").slice(0, 2).join("-")}
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <span className="h-1.5 w-1.5 rounded-full bg-hawk" />
-                        {debate.hawk_model.split("-").slice(0, 2).join("-")}
-                      </span>
+                      {debate.is_best_of_n ? (
+                        <span className="rounded bg-accent/20 px-1.5 py-0.5 text-accent">
+                          Best of {debate.runs?.length || "N"}
+                        </span>
+                      ) : (
+                        <>
+                          <span className="flex items-center gap-1">
+                            <span className="h-1.5 w-1.5 rounded-full bg-minimizer" />
+                            {debate.minimizer_model?.split("-").slice(0, 2).join("-") || "—"}
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <span className="h-1.5 w-1.5 rounded-full bg-hawk" />
+                            {debate.hawk_model?.split("-").slice(0, 2).join("-") || "—"}
+                          </span>
+                        </>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -544,6 +727,9 @@ export default function Home() {
                 setResponses({});
                 setSummaries({});
                 setSources([]);
+                setMultiResponses({});
+                setViewingLoadedDebate(false);
+                setBestOfN(false);
                 setHistoryOpen(false);
               }}
               className="w-full rounded-lg border border-zinc-600 bg-zinc-800 px-4 py-2 text-sm text-zinc-300 transition-colors hover:border-accent hover:text-white"
@@ -573,58 +759,194 @@ export default function Home() {
           </p>
         </header>
 
-        {/* Model Selectors */}
-        <div className="mx-auto mb-6 grid max-w-3xl grid-cols-2 gap-4">
-          <div>
-            <label className="mb-2 flex items-center gap-2 text-sm text-zinc-400">
-              <span className="h-2 w-2 rounded-full bg-minimizer" />
-              The Minimizer
+        {/* Model Configuration */}
+        <div className="mx-auto mb-6 max-w-3xl">
+          {/* Mode Toggle */}
+          <div className="mb-4 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setBestOfN(false)}
+                disabled={loading || viewingLoadedDebate}
+                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                  !bestOfN
+                    ? "bg-accent text-black"
+                    : "bg-zinc-800 text-zinc-400 hover:text-white"
+                } disabled:opacity-50 disabled:cursor-not-allowed`}
+              >
+                Single Run
+              </button>
+              <button
+                onClick={() => setBestOfN(true)}
+                disabled={loading || viewingLoadedDebate}
+                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                  bestOfN
+                    ? "bg-accent text-black"
+                    : "bg-zinc-800 text-zinc-400 hover:text-white"
+                } disabled:opacity-50 disabled:cursor-not-allowed`}
+              >
+                Best of N
+              </button>
+              {viewingLoadedDebate && (
+                <span className="text-xs text-zinc-500">(viewing saved debate)</span>
+              )}
+            </div>
+            <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-400 hover:text-zinc-300">
+              <input
+                type="checkbox"
+                checked={compactMode}
+                onChange={(e) => setCompactMode(e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-zinc-600 bg-zinc-800 text-accent focus:ring-accent focus:ring-offset-0"
+              />
+              <span>Compact view</span>
             </label>
-            <select
-              value={minimizerModel}
-              onChange={(e) => setMinimizerModel(e.target.value)}
-              disabled={loading}
-              className="w-full rounded-lg border border-zinc-700 bg-zinc-900/50 px-3 py-2 text-sm text-white focus:border-minimizer focus:outline-none focus:ring-1 focus:ring-minimizer disabled:opacity-50"
-            >
-              {AVAILABLE_MODELS.map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </select>
           </div>
-          <div>
-            <label className="mb-2 flex items-center gap-2 text-sm text-zinc-400">
-              <span className="h-2 w-2 rounded-full bg-hawk" />
-              The Compliance Hawk
-            </label>
-            <select
-              value={hawkModel}
-              onChange={(e) => setHawkModel(e.target.value)}
-              disabled={loading}
-              className="w-full rounded-lg border border-zinc-700 bg-zinc-900/50 px-3 py-2 text-sm text-white focus:border-hawk focus:outline-none focus:ring-1 focus:ring-hawk disabled:opacity-50"
-            >
-              {AVAILABLE_MODELS.map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
 
-        {/* View Options */}
-        <div className="mx-auto mb-4 flex max-w-3xl items-center justify-end gap-4">
-          <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-400 hover:text-zinc-300">
-            <input
-              type="checkbox"
-              checked={compactMode}
-              onChange={(e) => setCompactMode(e.target.checked)}
-              className="h-3.5 w-3.5 rounded border-zinc-600 bg-zinc-800 text-accent focus:ring-accent focus:ring-offset-0"
-            />
-            <span>Compact view</span>
-            <span className="text-[10px] text-zinc-500">(scrollable responses)</span>
-          </label>
+          {/* Simple Mode - Single Model Pair */}
+          {!bestOfN && (
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="mb-2 flex items-center gap-2 text-sm text-zinc-400">
+                  <span className="h-2 w-2 rounded-full bg-minimizer" />
+                  The Minimizer
+                </label>
+                <select
+                  value={minimizerModel}
+                  onChange={(e) => setMinimizerModel(e.target.value)}
+                  disabled={loading}
+                  className="w-full rounded-lg border border-zinc-700 bg-zinc-900/50 px-3 py-2 text-sm text-white focus:border-minimizer focus:outline-none focus:ring-1 focus:ring-minimizer disabled:opacity-50"
+                >
+                  {AVAILABLE_MODELS.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="mb-2 flex items-center gap-2 text-sm text-zinc-400">
+                  <span className="h-2 w-2 rounded-full bg-hawk" />
+                  The Compliance Hawk
+                </label>
+                <select
+                  value={hawkModel}
+                  onChange={(e) => setHawkModel(e.target.value)}
+                  disabled={loading}
+                  className="w-full rounded-lg border border-zinc-700 bg-zinc-900/50 px-3 py-2 text-sm text-white focus:border-hawk focus:outline-none focus:ring-1 focus:ring-hawk disabled:opacity-50"
+                >
+                  {AVAILABLE_MODELS.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          )}
+
+          {/* Best of N Mode - Multiple Model Pairs */}
+          {bestOfN && (
+            <div className="rounded-lg border border-zinc-700 bg-zinc-900/30 p-4">
+              <div className="mb-4 flex items-center justify-between">
+                <p className="text-sm text-zinc-400">
+                  Configure {runConfigs.length} debate runs with different model combinations
+                </p>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      if (runConfigs.length < 5) {
+                        setRunConfigs([
+                          ...runConfigs,
+                          {
+                            id: `run-${runConfigs.length + 1}`,
+                            minimizerModel: "gpt-5.1-2025-11-13",
+                            hawkModel: "gpt-5-2025-08-07",
+                          },
+                        ]);
+                      }
+                    }}
+                    disabled={loading || runConfigs.length >= 5}
+                    className="rounded bg-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-600 disabled:opacity-50"
+                  >
+                    + Add Run
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                {runConfigs.map((config, index) => (
+                  <div
+                    key={config.id}
+                    className="flex items-center gap-3 rounded-lg border border-zinc-700/50 bg-zinc-800/50 p-3"
+                  >
+                    <span className="w-16 shrink-0 text-sm font-medium text-zinc-300">
+                      Run {index + 1}
+                    </span>
+                    <div className="flex flex-1 items-center gap-2">
+                      <div className="flex-1">
+                        <div className="mb-1 flex items-center gap-1">
+                          <span className="h-1.5 w-1.5 rounded-full bg-minimizer" />
+                          <span className="text-[10px] text-zinc-500">Minimizer</span>
+                        </div>
+                        <select
+                          value={config.minimizerModel}
+                          onChange={(e) => {
+                            const updated = [...runConfigs];
+                            updated[index].minimizerModel = e.target.value;
+                            setRunConfigs(updated);
+                          }}
+                          disabled={loading}
+                          className="w-full rounded border border-zinc-600 bg-zinc-700 px-2 py-1 text-xs text-white focus:border-minimizer focus:outline-none disabled:opacity-50"
+                        >
+                          {AVAILABLE_MODELS.map((model) => (
+                            <option key={model} value={model}>
+                              {model}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <span className="text-zinc-500">vs</span>
+                      <div className="flex-1">
+                        <div className="mb-1 flex items-center gap-1">
+                          <span className="h-1.5 w-1.5 rounded-full bg-hawk" />
+                          <span className="text-[10px] text-zinc-500">Hawk</span>
+                        </div>
+                        <select
+                          value={config.hawkModel}
+                          onChange={(e) => {
+                            const updated = [...runConfigs];
+                            updated[index].hawkModel = e.target.value;
+                            setRunConfigs(updated);
+                          }}
+                          disabled={loading}
+                          className="w-full rounded border border-zinc-600 bg-zinc-700 px-2 py-1 text-xs text-white focus:border-hawk focus:outline-none disabled:opacity-50"
+                        >
+                          {AVAILABLE_MODELS.map((model) => (
+                            <option key={model} value={model}>
+                              {model}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                    {runConfigs.length > 2 && (
+                      <button
+                        onClick={() => {
+                          setRunConfigs(runConfigs.filter((_, i) => i !== index));
+                        }}
+                        disabled={loading}
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-700 hover:text-red-400 disabled:opacity-50"
+                        title="Remove run"
+                      >
+                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Exa Web Search Config */}
@@ -805,8 +1127,8 @@ e.g., 'Section 14Q deduction for renovation costs' or 'IRAS e-Tax Guide on trans
                         <div className="min-w-0 flex-1">
                           <a
                             href={source.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
+            target="_blank"
+            rel="noopener noreferrer"
                             className="text-accent hover:underline"
                           >
                             {source.title}
@@ -830,7 +1152,7 @@ e.g., 'Section 14Q deduction for renovation costs' or 'IRAS e-Tax Guide on trans
         )}
 
         {/* Hint for highlight feature */}
-        {hasResponses && !loading && (
+        {(hasResponses || hasMultiResponses) && !loading && (
           <div className="mx-auto mb-4 max-w-3xl text-center">
             <p className="text-xs text-zinc-500">
               💡 Highlight any text in the responses to ask a follow-up question
@@ -934,8 +1256,8 @@ e.g., 'Section 14Q deduction for renovation costs' or 'IRAS e-Tax Guide on trans
                             </span>
                             <a
                               href={source.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
+            target="_blank"
+            rel="noopener noreferrer"
                               className="line-clamp-1 text-zinc-400 hover:text-accent hover:underline"
                               title={source.title}
                             >
@@ -952,8 +1274,146 @@ e.g., 'Section 14Q deduction for renovation costs' or 'IRAS e-Tax Guide on trans
           </div>
         )}
 
+        {/* Multi-Run Results (Best of N mode) - Horizontal Scroll */}
+        {hasMultiResponses && (
+          <div className="relative">
+            {/* Scroll hint */}
+            <div className="mb-3 flex items-center justify-between">
+              <p className="text-sm text-zinc-500">
+                {multiRunList.length} runs • Scroll horizontally to compare →
+              </p>
+              <div className="flex gap-1">
+                {multiRunList.map(([runId], index) => (
+                  <button
+                    key={runId}
+                    onClick={() => {
+                      const el = document.getElementById(`run-${runId}`);
+                      el?.scrollIntoView({ behavior: "smooth", inline: "start", block: "nearest" });
+                    }}
+                    className="flex h-6 w-6 items-center justify-center rounded bg-zinc-800 text-xs text-zinc-400 hover:bg-accent hover:text-black transition-colors"
+                  >
+                    {index + 1}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Horizontal scroll container */}
+            <div className="scrollable-content -mx-4 overflow-x-auto px-4 pb-4 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
+              <div className="flex gap-6" style={{ width: `${multiRunList.length * 800}px`, maxWidth: "none" }}>
+                {multiRunList.map(([runId, result], index) => {
+                  const runConfig = runConfigs.find((c) => c.id === runId);
+                  
+                  return (
+                    <div
+                      key={runId}
+                      id={`run-${runId}`}
+                      className="w-[780px] shrink-0 overflow-hidden rounded-xl border border-zinc-700 bg-card"
+                    >
+                      {/* Run Header */}
+                      <div className="flex items-center justify-between border-b border-zinc-700 bg-zinc-800/50 px-5 py-3">
+                        <div className="flex items-center gap-3">
+                          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent/20 text-sm font-bold text-accent">
+                            {index + 1}
+                          </span>
+                          <div>
+                            <h3 className="font-semibold text-white">Run {index + 1}</h3>
+                            <p className="text-xs text-zinc-500">
+                              <span className="text-minimizer">{runConfig?.minimizerModel.split("-").slice(0, 2).join("-")}</span>
+                              {" vs "}
+                              <span className="text-hawk">{runConfig?.hawkModel.split("-").slice(0, 2).join("-")}</span>
+                            </p>
+                          </div>
+                        </div>
+                        {loading && (
+                          <span className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+                        )}
+                      </div>
+
+                      {/* Dual response grid */}
+                      <div className="grid grid-cols-2 divide-x divide-zinc-700">
+                        {/* Minimizer Response */}
+                        <div className="flex flex-col">
+                          <div
+                            className="shrink-0 border-b px-4 py-3"
+                            style={{
+                              backgroundColor: `${result.minimizer.color}10`,
+                              borderColor: `${result.minimizer.color}30`,
+                            }}
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className="text-lg">💰</span>
+                              <div>
+                                <h4 className="text-sm font-bold" style={{ color: result.minimizer.color }}>
+                                  {result.minimizer.name}
+                                </h4>
+                                <span className="text-[10px] text-zinc-500">{result.minimizer.model}</span>
+                              </div>
+                            </div>
+                          </div>
+                          <div
+                            className={`p-4 ${compactMode ? "scrollable-content overflow-y-auto" : ""}`}
+                            style={compactMode ? { maxHeight: "400px" } : undefined}
+                          >
+                            <div className="response-content text-sm leading-relaxed">
+                              {result.minimizer.content ? (
+                                formatContent(result.minimizer.content)
+                              ) : (
+                                <div className="space-y-2">
+                                  <div className="h-3 w-3/4 animate-pulse rounded bg-zinc-700" />
+                                  <div className="h-3 w-full animate-pulse rounded bg-zinc-700" />
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Hawk Response */}
+                        <div className="flex flex-col">
+                          <div
+                            className="shrink-0 border-b px-4 py-3"
+                            style={{
+                              backgroundColor: `${result.hawk.color}10`,
+                              borderColor: `${result.hawk.color}30`,
+                            }}
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className="text-lg">⚖️</span>
+                              <div>
+                                <h4 className="text-sm font-bold" style={{ color: result.hawk.color }}>
+                                  {result.hawk.name}
+                                </h4>
+                                <span className="text-[10px] text-zinc-500">{result.hawk.model}</span>
+                              </div>
+                            </div>
+                          </div>
+                          <div
+                            className={`p-4 ${compactMode ? "scrollable-content overflow-y-auto" : ""}`}
+                            style={compactMode ? { maxHeight: "400px" } : undefined}
+                          >
+                            <div className="response-content text-sm leading-relaxed">
+                              {result.hawk.content ? (
+                                formatContent(result.hawk.content)
+                              ) : (
+                                <div className="space-y-2">
+                                  <div className="h-3 w-3/4 animate-pulse rounded bg-zinc-700" />
+                                  <div className="h-3 w-full animate-pulse rounded bg-zinc-700" />
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Empty State */}
-        {!hasResponses && !loading && !searching && (
+        {!hasResponses && !hasMultiResponses && !loading && !searching && (
           <div className="text-center text-zinc-500">
             <p>Enter a tax topic above to see two opposing perspectives</p>
           </div>

@@ -102,7 +102,12 @@ async function searchTaxContext(
   }
 }
 
-async function* streamPersonaResponse(persona: Persona, topic: string, webContext: string) {
+async function* streamPersonaResponse(
+  persona: Persona,
+  topic: string,
+  webContext: string,
+  runId?: string
+) {
   const contextPrompt = webContext
     ? `\n\nREFERENCE MATERIAL FROM WEB SEARCH:\n${webContext}\n\nUse the above reference material to inform your analysis where relevant. Cite specific sources when applicable.`
     : "";
@@ -117,6 +122,7 @@ async function* streamPersonaResponse(persona: Persona, topic: string, webContex
   for await (const event of stream) {
     if (event.type === "response.output_text.delta") {
       yield {
+        runId,
         personaId: persona.id,
         personaName: persona.name,
         color: persona.color,
@@ -125,6 +131,12 @@ async function* streamPersonaResponse(persona: Persona, topic: string, webContex
     }
   }
 }
+
+type RunConfig = {
+  id: string;
+  minimizerModel: string;
+  hawkModel: string;
+};
 
 export async function POST(request: NextRequest) {
   try {
@@ -137,6 +149,7 @@ export async function POST(request: NextRequest) {
       searchType = "auto",
       numResults = 5,
       includeSummary = false,
+      runConfigs, // New: array of run configs for Best of N mode
     } = await request.json();
 
     if (!topic || typeof topic !== "string") {
@@ -146,15 +159,29 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Override models if provided
-    const minimizerWithModel = { ...MINIMIZER, model: minimizerModel || MINIMIZER.model };
-    const hawkWithModel = { ...COMPLIANCE_HAWK, model: hawkModel || COMPLIANCE_HAWK.model };
+    // Determine if this is single run or multi-run mode
+    const isMultiRun = Array.isArray(runConfigs) && runConfigs.length > 0;
+    
+    // Build the runs array
+    const runs: Array<{ id: string; minimizer: Persona; hawk: Persona }> = isMultiRun
+      ? (runConfigs as RunConfig[]).map((config) => ({
+          id: config.id,
+          minimizer: { ...MINIMIZER, model: config.minimizerModel },
+          hawk: { ...COMPLIANCE_HAWK, model: config.hawkModel },
+        }))
+      : [
+          {
+            id: "single",
+            minimizer: { ...MINIMIZER, model: minimizerModel || MINIMIZER.model },
+            hawk: { ...COMPLIANCE_HAWK, model: hawkModel || COMPLIANCE_HAWK.model },
+          },
+        ];
 
     const encoder = new TextEncoder();
 
     const stream = new ReadableStream({
       async start(controller) {
-        // Optionally search for web context first
+        // Optionally search for web context first (shared across all runs)
         let webContext = "";
         let sources: SearchResult[] = [];
 
@@ -166,13 +193,12 @@ export async function POST(request: NextRequest) {
           const searchResult = await searchTaxContext(topic, {
             searchMode,
             searchType,
-            numResults: Math.min(Math.max(numResults, 3), 15), // clamp 3-15
+            numResults: Math.min(Math.max(numResults, 3), 15),
             includeSummary,
           });
           webContext = searchResult.context;
           sources = searchResult.results;
 
-          // Send sources to frontend
           if (sources.length > 0) {
             controller.enqueue(
               encoder.encode(`data: ${JSON.stringify({ type: "sources", sources })}\n\n`)
@@ -180,41 +206,52 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        // Send initial metadata for both personas
+        // Send initial metadata for all runs
         controller.enqueue(
           encoder.encode(
             `data: ${JSON.stringify({
               type: "init",
-              personas: [
-                { id: minimizerWithModel.id, name: minimizerWithModel.name, color: minimizerWithModel.color, model: minimizerWithModel.model },
-                { id: hawkWithModel.id, name: hawkWithModel.name, color: hawkWithModel.color, model: hawkWithModel.model },
-              ],
+              isMultiRun,
+              runs: runs.map((run) => ({
+                id: run.id,
+                personas: [
+                  { id: run.minimizer.id, name: run.minimizer.name, color: run.minimizer.color, model: run.minimizer.model },
+                  { id: run.hawk.id, name: run.hawk.name, color: run.hawk.color, model: run.hawk.model },
+                ],
+              })),
             })}\n\n`
           )
         );
 
-        // Stream both personas in parallel
-        const minimizerStream = streamPersonaResponse(minimizerWithModel, topic, webContext);
-        const hawkStream = streamPersonaResponse(hawkWithModel, topic, webContext);
+        // Stream all runs in parallel
+        const allStreamPromises: Promise<void>[] = [];
 
-        const streamPromises = [
-          (async () => {
-            for await (const chunk of minimizerStream) {
-              controller.enqueue(
-                encoder.encode(`data: ${JSON.stringify({ type: "delta", ...chunk })}\n\n`)
-              );
-            }
-          })(),
-          (async () => {
-            for await (const chunk of hawkStream) {
-              controller.enqueue(
-                encoder.encode(`data: ${JSON.stringify({ type: "delta", ...chunk })}\n\n`)
-              );
-            }
-          })(),
-        ];
+        for (const run of runs) {
+          const minimizerStream = streamPersonaResponse(run.minimizer, topic, webContext, run.id);
+          const hawkStream = streamPersonaResponse(run.hawk, topic, webContext, run.id);
 
-        await Promise.all(streamPromises);
+          allStreamPromises.push(
+            (async () => {
+              for await (const chunk of minimizerStream) {
+                controller.enqueue(
+                  encoder.encode(`data: ${JSON.stringify({ type: "delta", ...chunk })}\n\n`)
+                );
+              }
+            })()
+          );
+
+          allStreamPromises.push(
+            (async () => {
+              for await (const chunk of hawkStream) {
+                controller.enqueue(
+                  encoder.encode(`data: ${JSON.stringify({ type: "delta", ...chunk })}\n\n`)
+                );
+              }
+            })()
+          );
+        }
+
+        await Promise.all(allStreamPromises);
 
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "done" })}\n\n`));
         controller.close();
