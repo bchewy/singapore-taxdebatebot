@@ -13,28 +13,86 @@ type SearchResult = {
   title: string;
   url: string;
   text?: string;
+  summary?: string;
 };
 
-async function searchTaxContext(topic: string): Promise<{ results: SearchResult[]; context: string }> {
+type SearchMode = "trusted" | "wide" | "all";
+type SearchType = "fast" | "auto" | "neural";
+
+const TRUSTED_DOMAINS = [
+  "iras.gov.sg",
+  "singaporelegaladvice.com",
+  "kpmg.com",
+  "pwc.com",
+  "ey.com",
+  "deloitte.com",
+];
+
+const WIDE_DOMAINS = [
+  ...TRUSTED_DOMAINS,
+  "taxathand.com",
+  "accaglobal.com",
+  "lexology.com",
+  "mondaq.com",
+  "tax.thomsonreuters.com",
+  "internationaltaxreview.com",
+  "mof.gov.sg",
+  "edb.gov.sg",
+];
+
+type ExaSearchConfig = {
+  searchMode: SearchMode;
+  searchType: SearchType;
+  numResults: number;
+  includeSummary: boolean;
+};
+
+async function searchTaxContext(
+  topic: string,
+  config: ExaSearchConfig
+): Promise<{ results: SearchResult[]; context: string }> {
   try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const searchOptions: any = {
+      type: config.searchType,
+      numResults: config.numResults,
+      text: { maxCharacters: 3000 },
+    };
+
+    // Add summary if requested
+    if (config.includeSummary) {
+      searchOptions.summary = { query: "Key tax implications and rulings" };
+    }
+
+    // Only add domain restrictions if not "all"
+    if (config.searchMode === "trusted") {
+      searchOptions.includeDomains = TRUSTED_DOMAINS;
+    } else if (config.searchMode === "wide") {
+      searchOptions.includeDomains = WIDE_DOMAINS;
+    }
+    // "all" = no domain restrictions
+
     const result = await exa.searchAndContents(
-      `Singapore tax IRAS ${topic}`,
-      {
-        type: "auto",
-        numResults: 5,
-        text: { maxCharacters: 2000 },
-        includeDomains: ["iras.gov.sg", "taxguru.sg", "singaporelegaladvice.com", "kpmg.com", "pwc.com", "ey.com", "deloitte.com"],
-      }
+      `Singapore tax ${topic}`,
+      searchOptions
     );
 
-    const results: SearchResult[] = result.results.map((r) => ({
-      title: r.title || "Untitled",
-      url: r.url,
-      text: r.text,
-    }));
+    const results: SearchResult[] = result.results.map((r) => {
+      const item = r as { text?: string; summary?: string };
+      return {
+        title: r.title || "Untitled",
+        url: r.url,
+        text: item.text,
+        summary: item.summary,
+      };
+    });
 
+    // Build context with summaries if available
     const context = results
-      .map((r, i) => `[Source ${i + 1}: ${r.title}]\n${r.text || "No content available"}`)
+      .map((r, i) => {
+        const summaryPart = r.summary ? `\nSUMMARY: ${r.summary}` : "";
+        return `[Source ${i + 1}: ${r.title}]${summaryPart}\n${r.text || "No content available"}`;
+      })
       .join("\n\n---\n\n");
 
     return { results, context };
@@ -70,7 +128,16 @@ async function* streamPersonaResponse(persona: Persona, topic: string, webContex
 
 export async function POST(request: NextRequest) {
   try {
-    const { topic, minimizerModel, hawkModel, enableWebSearch } = await request.json();
+    const {
+      topic,
+      minimizerModel,
+      hawkModel,
+      enableWebSearch,
+      searchMode = "wide",
+      searchType = "auto",
+      numResults = 5,
+      includeSummary = false,
+    } = await request.json();
 
     if (!topic || typeof topic !== "string") {
       return new Response(JSON.stringify({ error: "Topic is required" }), {
@@ -96,7 +163,12 @@ export async function POST(request: NextRequest) {
             encoder.encode(`data: ${JSON.stringify({ type: "searching" })}\n\n`)
           );
 
-          const searchResult = await searchTaxContext(topic);
+          const searchResult = await searchTaxContext(topic, {
+            searchMode,
+            searchType,
+            numResults: Math.min(Math.max(numResults, 3), 15), // clamp 3-15
+            includeSummary,
+          });
           webContext = searchResult.context;
           sources = searchResult.results;
 
