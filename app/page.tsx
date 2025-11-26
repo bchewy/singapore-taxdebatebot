@@ -50,6 +50,7 @@ export default function Home() {
   const [searchType, setSearchType] = useState<"fast" | "auto" | "neural">("auto");
   const [numResults, setNumResults] = useState(5);
   const [includeSummary, setIncludeSummary] = useState(false);
+  const [compactMode, setCompactMode] = useState(false); // Scrollable responses
 
   // History state
   const [history, setHistory] = useState<Debate[]>([]);
@@ -612,6 +613,20 @@ export default function Home() {
           </div>
         </div>
 
+        {/* View Options */}
+        <div className="mx-auto mb-4 flex max-w-3xl items-center justify-end gap-4">
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-400 hover:text-zinc-300">
+            <input
+              type="checkbox"
+              checked={compactMode}
+              onChange={(e) => setCompactMode(e.target.checked)}
+              className="h-3.5 w-3.5 rounded border-zinc-600 bg-zinc-800 text-accent focus:ring-accent focus:ring-offset-0"
+            />
+            <span>Compact view</span>
+            <span className="text-[10px] text-zinc-500">(scrollable responses)</span>
+          </label>
+        </div>
+
         {/* Exa Web Search Config */}
         <div className="mx-auto mb-6 max-w-3xl rounded-lg border border-zinc-700 bg-zinc-900/30 p-4">
           {/* Main toggle row */}
@@ -885,10 +900,10 @@ e.g., 'Section 14Q deduction for renovation costs' or 'IRAS e-Tax Guide on trans
                   </div>
                 ) : null}
 
-                {/* Scrollable content area - uses calc for explicit height */}
+                {/* Content area - scrollable in compact mode */}
                 <div 
-                  className="scrollable-content flex-1 overflow-y-auto px-5 pb-5"
-                  style={{ maxHeight: "calc(70vh - 140px)" }}
+                  className={`px-5 pb-5 ${compactMode ? "scrollable-content overflow-y-auto" : ""}`}
+                  style={compactMode ? { maxHeight: "calc(70vh - 140px)" } : undefined}
                 >
                   <div className="response-content text-sm leading-relaxed select-text">
                     {response.content ? (
