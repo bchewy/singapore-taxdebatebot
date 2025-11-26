@@ -649,7 +649,7 @@ export default function Home() {
   const multiRunList = Object.entries(multiResponses);
 
   return (
-    <div className="min-h-screen grid-bg">
+    <div className="min-h-screen grid-bg overflow-x-hidden">
       {/* History Toggle Button */}
       <button
         onClick={() => setHistoryOpen(!historyOpen)}
