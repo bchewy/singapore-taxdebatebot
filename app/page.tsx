@@ -1,65 +1,435 @@
-import Image from "next/image";
+"use client";
+
+import { useState, useCallback, useRef } from "react";
+
+const AVAILABLE_MODELS = [
+  "gpt-5.1-2025-11-13",
+  "gpt-5-2025-08-07",
+  "gpt-5-mini-2025-08-07",
+  "gpt-5-nano-2025-08-07",
+] as const;
+
+type PersonaMeta = {
+  id: string;
+  name: string;
+  color: string;
+  model?: string;
+};
+
+type PersonaContent = PersonaMeta & {
+  content: string;
+};
+
+type Source = {
+  title: string;
+  url: string;
+};
 
 export default function Home() {
+  const [topic, setTopic] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [searching, setSearching] = useState(false);
+  const [summarizing, setSummarizing] = useState(false);
+  const [responses, setResponses] = useState<Record<string, PersonaContent>>({});
+  const [summaries, setSummaries] = useState<Record<string, string>>({});
+  const [sources, setSources] = useState<Source[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [minimizerModel, setMinimizerModel] = useState<string>("gpt-5.1-2025-11-13");
+  const [hawkModel, setHawkModel] = useState<string>("gpt-5.1-2025-11-13");
+  const [enableWebSearch, setEnableWebSearch] = useState(true);
+
+  // Track accumulated content for summarization
+  const accumulatedContent = useRef<Record<string, string>>({});
+
+  const fetchSummaries = useCallback(async (contents: Record<string, string>) => {
+    setSummarizing(true);
+    try {
+      const summaryPromises = Object.entries(contents).map(async ([personaId, content]) => {
+        const res = await fetch("/api/summarize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content, personaId }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          return { personaId, summary: data.summary };
+        }
+        return { personaId, summary: null };
+      });
+
+      const results = await Promise.all(summaryPromises);
+      const newSummaries: Record<string, string> = {};
+      for (const { personaId, summary } of results) {
+        if (summary) newSummaries[personaId] = summary;
+      }
+      setSummaries(newSummaries);
+    } catch (err) {
+      console.error("Failed to fetch summaries:", err);
+    } finally {
+      setSummarizing(false);
+    }
+  }, []);
+
+  const handleSubmit = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (!topic.trim() || loading) return;
+
+      setLoading(true);
+      setSearching(false);
+      setError(null);
+      setResponses({});
+      setSummaries({});
+      setSources([]);
+      accumulatedContent.current = {};
+
+      try {
+        const res = await fetch("/api/debate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            topic: topic.trim(),
+            minimizerModel,
+            hawkModel,
+            enableWebSearch,
+          }),
+        });
+
+        if (!res.ok) {
+          throw new Error("Failed to get debate responses");
+        }
+
+        const reader = res.body?.getReader();
+        if (!reader) throw new Error("No response body");
+
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            if (line.startsWith("data: ")) {
+              const data = JSON.parse(line.slice(6));
+
+              if (data.type === "searching") {
+                setSearching(true);
+              } else if (data.type === "sources") {
+                setSources(data.sources);
+                setSearching(false);
+              } else if (data.type === "init") {
+                setSearching(false);
+                const initial: Record<string, PersonaContent> = {};
+                for (const p of data.personas) {
+                  initial[p.id] = { ...p, content: "" };
+                  accumulatedContent.current[p.id] = "";
+                }
+                setResponses(initial);
+              } else if (data.type === "delta") {
+                accumulatedContent.current[data.personaId] =
+                  (accumulatedContent.current[data.personaId] || "") + data.delta;
+                setResponses((prev) => ({
+                  ...prev,
+                  [data.personaId]: {
+                    ...prev[data.personaId],
+                    content: accumulatedContent.current[data.personaId],
+                  },
+                }));
+              }
+            }
+          }
+        }
+
+        // Streaming done - now fetch summaries
+        if (Object.keys(accumulatedContent.current).length > 0) {
+          fetchSummaries(accumulatedContent.current);
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Something went wrong");
+      } finally {
+        setLoading(false);
+        setSearching(false);
+      }
+    },
+    [topic, loading, minimizerModel, hawkModel, enableWebSearch, fetchSummaries]
+  );
+
+  // Parse inline **bold** markdown
+  const parseInlineBold = (text: string) => {
+    const parts = text.split(/(\*\*[^*]+\*\*)/g);
+    return parts.map((part, idx) => {
+      if (part.startsWith("**") && part.endsWith("**")) {
+        return (
+          <strong key={idx} className="font-semibold text-white">
+            {part.slice(2, -2)}
+          </strong>
+        );
+      }
+      return part;
+    });
+  };
+
+  const formatContent = (content: string) => {
+    return content.split("\n").map((line, i) => {
+      // Section headers like **Position**: or **Key Points**:
+      if (line.startsWith("**") && line.includes("**:")) {
+        const match = line.match(/\*\*(.+?)\*\*:?\s*(.*)/);
+        if (match) {
+          return (
+            <div key={i} className="mt-4 first:mt-0">
+              <span className="font-semibold text-white">{match[1]}:</span>
+              {match[2] && <span className="ml-1 text-zinc-300">{parseInlineBold(match[2])}</span>}
+            </div>
+          );
+        }
+      }
+      // Bullet points
+      if (line.startsWith("- ")) {
+        return (
+          <li key={i} className="ml-4 text-zinc-300">
+            {parseInlineBold(line.slice(2))}
+          </li>
+        );
+      }
+      // Empty lines
+      if (!line.trim()) return <div key={i} className="h-2" />;
+      // Regular text
+      return (
+        <p key={i} className="text-zinc-300">
+          {parseInlineBold(line)}
+        </p>
+      );
+    });
+  };
+
+  const responseList = Object.values(responses);
+  const hasResponses = responseList.length > 0;
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
+    <div className="min-h-screen grid-bg">
+      <div className="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
+        {/* Header */}
+        <header className="mb-12 text-center">
+          <h1 className="text-4xl font-bold tracking-tight text-white sm:text-5xl">
+            SG Tax Debate
           </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+          <p className="mt-3 text-lg text-zinc-400">
+            Two AI personas. Opposing views. One tax question.
           </p>
+        </header>
+
+        {/* Model Selectors */}
+        <div className="mx-auto mb-6 grid max-w-3xl grid-cols-2 gap-4">
+          <div>
+            <label className="mb-2 flex items-center gap-2 text-sm text-zinc-400">
+              <span className="h-2 w-2 rounded-full bg-minimizer" />
+              The Minimizer
+            </label>
+            <select
+              value={minimizerModel}
+              onChange={(e) => setMinimizerModel(e.target.value)}
+              disabled={loading}
+              className="w-full rounded-lg border border-zinc-700 bg-zinc-900/50 px-3 py-2 text-sm text-white focus:border-minimizer focus:outline-none focus:ring-1 focus:ring-minimizer disabled:opacity-50"
+            >
+              {AVAILABLE_MODELS.map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="mb-2 flex items-center gap-2 text-sm text-zinc-400">
+              <span className="h-2 w-2 rounded-full bg-hawk" />
+              The Compliance Hawk
+            </label>
+            <select
+              value={hawkModel}
+              onChange={(e) => setHawkModel(e.target.value)}
+              disabled={loading}
+              className="w-full rounded-lg border border-zinc-700 bg-zinc-900/50 px-3 py-2 text-sm text-white focus:border-hawk focus:outline-none focus:ring-1 focus:ring-hawk disabled:opacity-50"
+            >
+              {AVAILABLE_MODELS.map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+
+        {/* Web Search Toggle */}
+        <div className="mx-auto mb-6 max-w-3xl">
+          <label className="flex cursor-pointer items-center gap-3">
+            <div className="relative">
+              <input
+                type="checkbox"
+                checked={enableWebSearch}
+                onChange={(e) => setEnableWebSearch(e.target.checked)}
+                disabled={loading}
+                className="peer sr-only"
+              />
+              <div className="h-6 w-11 rounded-full bg-zinc-700 peer-checked:bg-accent peer-disabled:opacity-50 transition-colors" />
+              <div className="absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white transition-transform peer-checked:translate-x-5" />
+            </div>
+            <span className="text-sm text-zinc-400">
+              Web research (searches IRAS, tax firms for context)
+            </span>
+          </label>
+        </div>
+
+        {/* Input Form */}
+        <form onSubmit={handleSubmit} className="mx-auto mb-12 max-w-3xl">
+          <div className="relative">
+            <textarea
+              value={topic}
+              onChange={(e) => setTopic(e.target.value)}
+              placeholder="Enter a Singapore tax topic, circular, or scenario to debate...
+
+e.g., 'Section 14Q deduction for renovation costs' or 'IRAS e-Tax Guide on transfer pricing'"
+              className="w-full resize-none rounded-xl border border-zinc-700 bg-zinc-900/50 px-5 py-4 text-base text-white placeholder-zinc-500 backdrop-blur transition-colors focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              rows={3}
+              disabled={loading}
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+            <button
+              type="submit"
+              disabled={loading || !topic.trim()}
+              className="absolute bottom-4 right-4 rounded-lg bg-accent px-5 py-2 text-sm font-medium text-black transition-all hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {searching ? "Searching..." : loading ? "Debating..." : "Start Debate"}
+            </button>
+          </div>
+        </form>
+
+        {/* Error */}
+        {error && (
+          <div className="mx-auto mb-8 max-w-3xl rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-center text-red-400">
+            {error}
+          </div>
+        )}
+
+        {/* Searching State */}
+        {searching && (
+          <div className="mx-auto mb-8 max-w-3xl">
+            <div className="flex items-center justify-center gap-3 rounded-lg border border-accent/30 bg-accent/10 px-4 py-3">
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+              <span className="text-sm text-accent">Searching IRAS & tax resources...</span>
+            </div>
+          </div>
+        )}
+
+        {/* Sources */}
+        {sources.length > 0 && (
+          <div className="mx-auto mb-8 max-w-3xl">
+            <details className="group rounded-lg border border-zinc-700 bg-zinc-900/50">
+              <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-zinc-300 hover:text-white">
+                <span className="inline-flex items-center gap-2">
+                  <svg className="h-4 w-4 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+                  {sources.length} sources found
+                  <svg className="h-4 w-4 transition-transform group-open:rotate-180" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </span>
+              </summary>
+              <div className="border-t border-zinc-700 px-4 py-3">
+                <ul className="space-y-2">
+                  {sources.map((source, i) => (
+                    <li key={i} className="text-sm">
+                      <a
+                        href={source.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-accent hover:underline"
+                      >
+                        {source.title}
+                      </a>
+                      <span className="ml-2 text-zinc-500 text-xs truncate">
+                        {new URL(source.url).hostname}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </details>
+          </div>
+        )}
+
+        {/* Results / Streaming */}
+        {hasResponses && (
+          <div className="grid gap-6 lg:grid-cols-2">
+            {responseList.map((response) => (
+              <div
+                key={response.id}
+                className="rounded-xl border-2 bg-card p-6"
+                style={{ borderColor: response.color }}
+              >
+                <div className="mb-4 flex items-center gap-3">
+                  <div
+                    className="h-3 w-3 rounded-full"
+                    style={{ backgroundColor: response.color }}
+                  />
+                  <h3 className="text-lg font-semibold text-white">{response.name}</h3>
+                  {response.model && (
+                    <span className="rounded bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">
+                      {response.model}
+                    </span>
+                  )}
+                  {(loading || summarizing) && (
+                    <span
+                      className="ml-auto h-2 w-2 animate-pulse rounded-full"
+                      style={{ backgroundColor: response.color }}
+                    />
+                  )}
+                </div>
+
+                {/* TL;DR Summary */}
+                {summaries[response.id] ? (
+                  <div
+                    className="mb-4 rounded-lg p-3 text-sm"
+                    style={{ backgroundColor: `${response.color}15`, borderLeft: `3px solid ${response.color}` }}
+                  >
+                    <span className="font-semibold text-white">TL;DR: </span>
+                    <span className="text-zinc-300">{summaries[response.id]}</span>
+                  </div>
+                ) : summarizing && !loading ? (
+                  <div
+                    className="mb-4 rounded-lg p-3 text-sm"
+                    style={{ backgroundColor: `${response.color}15`, borderLeft: `3px solid ${response.color}` }}
+                  >
+                    <span className="text-zinc-400">Generating summary...</span>
+                  </div>
+                ) : null}
+
+                <div className="response-content text-sm leading-relaxed">
+                  {response.content ? (
+                    formatContent(response.content)
+                  ) : (
+                    <div className="space-y-3">
+                      <div className="h-4 w-3/4 animate-pulse rounded bg-zinc-700" />
+                      <div className="h-4 w-full animate-pulse rounded bg-zinc-700" />
+                      <div className="h-4 w-5/6 animate-pulse rounded bg-zinc-700" />
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Empty State */}
+        {!hasResponses && !loading && !searching && (
+          <div className="text-center text-zinc-500">
+            <p>Enter a tax topic above to see two opposing perspectives</p>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

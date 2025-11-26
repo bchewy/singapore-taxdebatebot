@@ -9,7 +9,9 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "exa-js": "^2.0.9",
     "next": "16.0.4",
+    "openai": "^6.9.1",
     "react": "19.2.0",
     "react-dom": "19.2.0"
   },
